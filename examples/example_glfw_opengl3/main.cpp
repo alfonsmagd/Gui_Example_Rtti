@@ -36,62 +36,100 @@
 
 using json = nlohmann::json;
 
+#define TEXTURE_VIEW_SIZE  ImVec2(300, 300) // Size of the texture view in pixels
+
 static void glfw_error_callback( int error, const char* description )
 {
     fprintf( stderr, "GLFW Error %d: %s\n", error, description );
 }
 
+GLuint GenerateCheckerTexture(int color)
+{
+    const int size = 164;
+    auto* pixels = new unsigned char[size * size * 4];
 
-namespace ReflectiveJson {
+    for (int y = 0; y < size; ++y)
+    {
+        for (int x = 0; x < size; ++x)
+        {
+            int i = (y * size + x) * 4;
+            bool checker = ((x / 8) % 2) ^ ((y / 8) % 2);
+            unsigned char c = checker ? color : 100;
+            pixels[i + 0] = c;
+            pixels[i + 1] = c;
+            pixels[i + 2] = c;
+            pixels[i + 3] = 255;
+        }
+    }
+
+    GLuint texID;
+    glGenTextures(1, &texID);
+    glBindTexture(GL_TEXTURE_2D, texID);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0,
+                  GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    delete[] pixels;
+    return texID;
+}
+
+
+namespace ReflectiveJson
+{
+   
 
     // ---------- Type name helper ----------
     template<typename T>
-    std::string getTypeName() {
+    std::string getTypeName()
+    {
         std::string raw = typeid(T).name();
         #if defined(__clang__) || defined(__GNUC__)
         int status;
-        char* demangled = abi::__cxa_demangle(raw.c_str(), nullptr, nullptr, &status);
+        char* demangled = abi::__cxa_demangle( raw.c_str(), nullptr, nullptr, &status );
         std::string result = (status == 0) ? demangled : raw;
-        std::free(demangled);
+        std::free( demangled );
         return result;
         #else
-        if (raw.rfind("struct ", 0) == 0) return raw.substr(7);
-        if (raw.rfind("class ", 0) == 0) return raw.substr(6);
+        if( raw.rfind( "struct ", 0 ) == 0 ) return raw.substr( 7 );
+        if( raw.rfind( "class ", 0 ) == 0 ) return raw.substr( 6 );
         return raw;
         #endif
     }
 
     // ---------- Reflection checker ----------
-    template<typename T, typename = void>
-    struct has_getFields : std::false_type {};
+    template<typename T>
+    concept HasGetFields = requires { T::getFields(); };
 
     template<typename T>
-    struct has_getFields<T, std::void_t<decltype(T::getFields())>> : std::true_type {};
-
-    template<typename T>
-    constexpr bool has_getFields_v = has_getFields<T>::value;
+    constexpr bool has_getFields_v = HasGetFields<T>;
 
     // ---------- FieldInfo ----------
     template<typename T>
-    struct FieldInfo {
+    struct FieldInfo
+    {
         const char* name;
         std::string typeName;
-        std::function<std::string(const T&)> getter;
-        std::function<void(T&)> drawGui;
+        std::function<std::string( const T& )> getter;
+        std::function<void( T& )> drawGui;
+        std::optional<std::pair<int, int>> intRange = std::nullopt;
+        std::optional<std::pair<float, float>> floatRange = std::nullopt;
     };
 
-    // ---------- Macro extendida ----------
-    #define RTTI(CLASS, ...) \
+    // ---------- Macros simplificadas ----------
+    #define RTTI_FIELDS_BEGIN(CLASS) \
     static const std::vector<ReflectiveJson::FieldInfo<CLASS>>& getFields() { \
-        static const std::vector<ReflectiveJson::FieldInfo<CLASS>> fields = { __VA_ARGS__ }; \
-        return fields; \
-    }
+        using CurrentClass = CLASS; \
+        static const std::vector<ReflectiveJson::FieldInfo<CLASS>> fields = {
 
-    #define RTTI_FIELD(CLASS, FIELD) \
-    ReflectiveJson::FieldInfo<CLASS>{ \
+    #define RTTI_FIELDS_END() \
+        }; return fields; }
+
+    #define RTTI_FIELD(FIELD) \
+    ReflectiveJson::FieldInfo<CurrentClass>{ \
         #FIELD, \
-        ReflectiveJson::getTypeName<decltype(CLASS::FIELD)>(), \
-        [](const CLASS& self) { \
+        ReflectiveJson::getTypeName<decltype(CurrentClass::FIELD)>(), \
+        [](const CurrentClass& self) { \
             using FieldType = decltype(self.FIELD); \
             if constexpr (std::is_same_v<FieldType, bool>) \
                 return self.FIELD ? "true" : "false"; \
@@ -102,18 +140,32 @@ namespace ReflectiveJson {
             else \
                 return "{object}"; \
         }, \
-        [](CLASS& self) { \
+        [](CurrentClass& self) { \
+            ImGui::PushID(#FIELD); \
             using FieldType = decltype(self.FIELD); \
             if constexpr (ReflectiveJson::has_getFields_v<FieldType>) { \
-                if (ImGui::CollapsingHeader(#FIELD)) { \
-                    ReflectiveJson::DrawImGui(self.FIELD,true); \
-                } \
+                if (ImGui::CollapsingHeader(#FIELD)) \
+                    ReflectiveJson::DrawImGui(self.FIELD, true); \
             } else if constexpr (std::is_same_v<FieldType, int>) { \
                 ImGui::DragInt(#FIELD, &self.FIELD); \
             } else if constexpr (std::is_same_v<FieldType, float>) { \
                 ImGui::DragFloat(#FIELD, &self.FIELD, 0.1f); \
             } else if constexpr (std::is_same_v<FieldType, bool>) { \
                 ImGui::Checkbox(#FIELD, &self.FIELD); \
+            } else if constexpr (std::is_same_v<FieldType, ImVec2>) { \
+                ImGui::DragFloat2(#FIELD, (float*)&self.FIELD); \
+            } else if constexpr (std::is_same_v<FieldType, ImVec4>) { \
+                ImGui::ColorEdit4(#FIELD, (float*)&self.FIELD, \
+                    ImGuiColorEditFlags_DisplayRGB | \
+                    ImGuiColorEditFlags_PickerHueBar | \
+                    ImGuiColorEditFlags_AlphaBar); \
+            } else if constexpr (std::is_same_v<FieldType, ImTextureID>) { \
+                ImGui::Text("%s", #FIELD); \
+                if (self.FIELD) { \
+                    ImGui::Image(self.FIELD, TEXTURE_VIEW_SIZE); \
+                } else { \
+                    ImGui::TextDisabled("Texture not visible or null"); \
+                } \
             } else if constexpr (std::is_same_v<FieldType, std::string>) { \
                 char buffer[256]; \
                 strncpy(buffer, self.FIELD.c_str(), sizeof(buffer)); \
@@ -122,61 +174,63 @@ namespace ReflectiveJson {
                     self.FIELD = buffer; \
                 } \
             } \
+            ImGui::PopID(); \
         } \
     }
 
-    // ---------- Macro RTTI_FIELDS (variadic) ----------
-    #define RTTI_FIELDS_1(CLASS, F1) RTTI_FIELD(CLASS, F1)
-    #define RTTI_FIELDS_2(CLASS, F1, F2) RTTI_FIELDS_1(CLASS, F1), RTTI_FIELD(CLASS, F2)
-    #define RTTI_FIELDS_3(CLASS, F1, F2, F3) RTTI_FIELDS_2(CLASS, F1, F2), RTTI_FIELD(CLASS, F3)
-    #define RTTI_FIELDS_4(CLASS, F1, F2, F3, F4) RTTI_FIELDS_3(CLASS, F1, F2, F3), RTTI_FIELD(CLASS, F4)
-    #define RTTI_FIELDS_5(CLASS, F1, F2, F3, F4, F5) RTTI_FIELDS_4(CLASS, F1, F2, F3, F4), RTTI_FIELD(CLASS, F5)
 
-    #define GET_MACRO(_1,_2,_3,_4,_5,NAME,...) NAME
-    #define RTTI_FIELDS(CLASS, ...) \
-        RTTI(CLASS, GET_MACRO(__VA_ARGS__, RTTI_FIELDS_5, RTTI_FIELDS_4, RTTI_FIELDS_3, RTTI_FIELDS_2, RTTI_FIELDS_1)(CLASS, __VA_ARGS__))
-
-    // ---------- Serializador ----------
-    template<typename T>
-    std::string serializeToJson(const T& obj) {
-        std::ostringstream oss;
-        oss << "{\n";
-        oss << "  \"type\": \"" << getTypeName<T>() << "\",\n";
-        const auto& fields = T::getFields();
-        for (size_t i = 0; i < fields.size(); ++i) {
-            const auto& field = fields[i];
-            oss << "  \"" << field.name << "\": {\n";
-            oss << "    \"type\": \"" << field.typeName << "\",\n";
-            oss << "    \"value\": " << field.getter(obj) << "\n";
-            oss << "  }";
-            if (i + 1 < fields.size()) oss << ",";
-            oss << "\n";
-        }
-        oss << "}";
-        return oss.str();
+    #define RTTI_FIELD_WITH_RANGE(FIELD, MIN, MAX) \
+    ReflectiveJson::FieldInfo<CurrentClass>{ \
+        #FIELD, \
+        ReflectiveJson::getTypeName<decltype(CurrentClass::FIELD)>(), \
+        [](const CurrentClass& self) { return std::to_string(self.FIELD); }, \
+        [](CurrentClass& self) { \
+            ImGui::PushID(#FIELD); \
+            if constexpr (std::is_same_v<decltype(self.FIELD), int>) { \
+                ImGui::SliderInt(#FIELD, &self.FIELD, MIN, MAX); \
+            } else if constexpr (std::is_same_v<decltype(self.FIELD), float>) { \
+                ImGui::SliderFloat(#FIELD, &self.FIELD, MIN, MAX); \
+            } else { \
+                ImGui::Text("Unsupported ranged type"); \
+            } \
+            ImGui::PopID(); \
+        }, \
+        std::is_same_v<decltype(CurrentClass::FIELD), int> ? std::make_optional(std::make_pair(MIN, MAX)) : std::nullopt, \
+        std::is_same_v<decltype(CurrentClass::FIELD), float> ? std::make_optional(std::make_pair(MIN, MAX)) : std::nullopt \
     }
+
+    // ---------- ImGui drawer ----------
     template<typename T>
-    void DrawImGui(T& obj, bool skipHeader = false) {
+    void DrawImGui( T& obj, bool skipHeader = false )
+    {
         std::string label = ReflectiveJson::getTypeName<T>();
-        if (label.empty()) label = "Unnamed";
+        if( label.empty() ) label = "Unnamed";
 
-        std::string headerId = label + "##" + std::to_string(reinterpret_cast<uintptr_t>(&obj));
+        std::string headerId = label + "##" + std::to_string( reinterpret_cast< uintptr_t >(&obj) );
 
-        if (skipHeader || ImGui::CollapsingHeader(headerId.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-            for (const auto& field : T::getFields()) {
-                if (field.drawGui)
-                    field.drawGui(obj);
+        if( skipHeader || ImGui::CollapsingHeader( headerId.c_str(), ImGuiTreeNodeFlags_DefaultOpen ) )
+        {
+            ImGui::PushID( &obj );
+            ImGui::Indent();
+            for( const auto& field : T::getFields() )
+            {
+                if( field.drawGui ) field.drawGui( obj );
             }
+            ImGui::Unindent();
+            ImGui::PopID();
         }
     }
 
+    // ---------- JSON Serializer ----------
     template<typename T>
-    json toJson(const T& obj) {
+    json toJson( const T& obj )
+    {
         json j;
-        j["type"] = getTypeName<T>();
-        for (const auto& field : T::getFields()) {
-            j[field.name]["type"] = field.typeName;
-            j[field.name]["value"] = field.getter(obj);
+        j[ "type" ] = getTypeName<T>();
+        for( const auto& field : T::getFields() )
+        {
+            j[ field.name ][ "type" ] = field.typeName;
+            j[ field.name ][ "value" ] = field.getter( obj );
         }
         return j;
     }
@@ -196,62 +250,123 @@ namespace ReflectiveJson {
 //    }
 //}
 
-struct Stats {
+struct Stats
+{
     int strength;
     float agility;
-    RTTI_FIELDS(Stats, strength, agility)
+
+    RTTI_FIELDS_BEGIN( Stats )
+        RTTI_FIELD_WITH_RANGE( strength, 0, 100 ),
+        RTTI_FIELD_WITH_RANGE( agility, 0.0f, 10.0f )
+        RTTI_FIELDS_END()
 };
 
-struct Player {
+struct Player
+{
     std::string name;
     bool alive;
     Stats stats;
-    RTTI_FIELDS(Player, name, alive, stats)
+
+    RTTI_FIELDS_BEGIN( Player )
+        RTTI_FIELD( name ),
+        RTTI_FIELD( alive ),
+        RTTI_FIELD( stats )
+        RTTI_FIELDS_END()
 };
 
-
-struct Albedo {
+struct Specular
+{
     float r;
     float g;
     float b;
     int a;
-    RTTI_FIELDS(Albedo, r, g, b )
+
+    RTTI_FIELDS_BEGIN( Specular )
+        RTTI_FIELD_WITH_RANGE( r, 0.0f, 1.0f ),
+        RTTI_FIELD_WITH_RANGE( g, 0.0f, 1.0f ),
+        RTTI_FIELD_WITH_RANGE( b, 0.0f, 1.0f )
+        RTTI_FIELDS_END()
 };
 
-struct Specular {
+struct Emissive
+{
     float r;
     float g;
     float b;
     int a;
-    RTTI_FIELDS(Specular, r, g, b)
+
+    RTTI_FIELDS_BEGIN( Emissive )
+        RTTI_FIELD_WITH_RANGE( r, 0.0f, 10.0f ),
+        RTTI_FIELD_WITH_RANGE( g, 0.0f, 10.0f ),
+        RTTI_FIELD_WITH_RANGE( b, 0.0f, 10.0f )
+        RTTI_FIELDS_END()
 };
 
-struct Emissive {
-    float r;
-    float g;
-    float b;
-    int a;
-    RTTI_FIELDS(Emissive, r, g, b)
-};
-
-struct Roughness {
+struct Roughness
+{
     float value;
-    RTTI_FIELDS(Roughness, value)
+
+    RTTI_FIELDS_BEGIN( Roughness )
+        RTTI_FIELD_WITH_RANGE( value, 0.0f, 1.0f )
+        RTTI_FIELDS_END()
 };
 
-struct Metallic {
+struct Metallic
+{
     float value;
-    RTTI_FIELDS(Metallic, value)
+
+    RTTI_FIELDS_BEGIN( Metallic )
+        RTTI_FIELD_WITH_RANGE( value, 0.0f, 1.0f )
+        RTTI_FIELDS_END()
 };
 
-struct Material {
-    Albedo albedo;
+struct Light
+{
+
+    ImVec4 color;
+    float intensity;
+    RTTI_FIELDS_BEGIN( Light )
+        RTTI_FIELD( color ),
+        RTTI_FIELD_WITH_RANGE( intensity, 0.0f, 100.0f )
+        RTTI_FIELDS_END()
+};
+
+struct Material
+{
     Specular specular;
     Emissive emissive;
     Roughness roughness;
     Metallic metallic;
-    RTTI_FIELDS(Material, albedo, specular, emissive, roughness, metallic)
+    Player owner;
+
+    RTTI_FIELDS_BEGIN( Material )
+        RTTI_FIELD( specular ),
+        RTTI_FIELD( emissive ),
+        RTTI_FIELD( roughness ),
+        RTTI_FIELD( metallic ),
+        RTTI_FIELD( owner )
+        RTTI_FIELDS_END()
 };
+
+
+
+struct  GFrameBuffer
+{
+    ImTextureID positionTex;
+    ImTextureID normalTex;
+    ImTextureID depthTex;
+
+    RTTI_FIELDS_BEGIN( GFrameBuffer )
+        RTTI_FIELD( positionTex ),
+        RTTI_FIELD( normalTex ),
+        RTTI_FIELD( depthTex )
+        RTTI_FIELDS_END()
+
+
+};
+
+
+
 
 
 
@@ -262,13 +377,17 @@ struct Material {
 int main( int, char** )
 {
 
-    Player player;
-  
-    Material material{};
+    //Player player;
 
-   auto j =  ReflectiveJson::toJson( material );
-    std::cout << j.dump(4) << std::endl; // bonito con indentación
-   
+    Material material{};
+    Light    light{};
+    //auto j =  ReflectiveJson::toJson( material );
+    // std::cout << j.dump(4) << std::endl; // bonito con indentaciÃ³n
+    //
+
+
+
+
 
 
     glfwSetErrorCallback( glfw_error_callback );
@@ -343,22 +462,21 @@ int main( int, char** )
     // - Read 'docs/FONTS.md' for more instructions and details.
     // - Remember that in C/C++ if you want to include a backslash \ in a string literal you need to write a double backslash \\ !
     // - Our Emscripten build process allows embedding fonts to be accessible at runtime from the "fonts/" folder. See Makefile.emscripten for details.
-    //style.FontSizeBase = 20.0f;
+    style.FontSizeBase = 20.0f;
     //io.Fonts->AddFontDefault();
     //io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\segoeui.ttf");
     //io.Fonts->AddFontFromFileTTF("../../misc/fonts/DroidSans.ttf");
-    //io.Fonts->AddFontFromFileTTF("../../misc/fonts/Roboto-Medium.ttf");
+    io.Fonts->AddFontFromFileTTF( "../../misc/fonts/Roboto-Medium.ttf" );
     //io.Fonts->AddFontFromFileTTF("../../misc/fonts/Cousine-Regular.ttf");
     //ImFont* font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\ArialUni.ttf");
     //IM_ASSERT(font != nullptr);
-
     // Our state
     bool show_demo_window = false;
     bool show_another_window = false;
     ImVec4 clear_color = ImVec4( 0.45f, 0.55f, 0.60f, 1.00f );
 
     style = ImGui::GetStyle();
-    main_scale = 1.5f; // You can adjust this value for bigger/smaller UI
+    main_scale = 1.2f; // You can adjust this value for bigger/smaller UI
     style.ScaleAllSizes( main_scale );
 
     // Main loop
@@ -369,7 +487,11 @@ int main( int, char** )
     EMSCRIPTEN_MAINLOOP_BEGIN
         #else
 
-    
+    //Simulate a texture for demonstration purposes
+    GFrameBuffer gFrameBuffer;
+    gFrameBuffer.positionTex = (ImTextureID)(uintptr_t)GenerateCheckerTexture(255);
+    gFrameBuffer.normalTex = (ImTextureID)(uintptr_t)GenerateCheckerTexture(123);
+    gFrameBuffer.depthTex = (ImTextureID)(uintptr_t)GenerateCheckerTexture(22);
     while( !glfwWindowShouldClose( window ) )
         #endif
     {
@@ -394,10 +516,16 @@ int main( int, char** )
         if( show_demo_window )
             ImGui::ShowDemoWindow( &show_demo_window );
 
-        Albedo albedo{};
-        ReflectiveJson::DrawImGui( player ); // Draw the ImGui interface for the Player object
-        ReflectiveJson::DrawImGui( material); // Draw the ImGui interface for the Stats object
-        //DrawImGui(albedo ); // Draw the ImGui interface for the Albedo object
+        //Albedo albedo{};
+        ReflectiveJson::DrawImGui( material ); 
+        Stats stats{};
+        ReflectiveJson::DrawImGui( stats ); 
+
+        ReflectiveJson::DrawImGui( light ); 
+
+        ReflectiveJson::DrawImGui( gFrameBuffer ); 
+
+      
 
         // 2. Show a simple window that we create ourselves. We use a Begin/End pair to create a named window.
         {
